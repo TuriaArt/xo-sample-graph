@@ -1,0 +1,16 @@
+{
+  "name": "xo-sample-graph",
+  "version": "2.0.0",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "index": "node indexer.js"
+  },
+  "dependencies": {
+    "d3-force": "^3.0.0"
+  },
+  "devDependencies": {
+    "electron": "^34.0.0"
+  }
+}

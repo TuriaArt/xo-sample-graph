@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+  <title>XO Sample Graph v2.0.0</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: #0f0f14; color: #eee; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+  #app { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  #topbar { flex: 0 0 auto; min-height: 44px; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 10px 10px; background: #141419; border-bottom: 1px solid #26262e; flex-wrap: wrap; justify-content: center; }
+  #filters { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: center; }
+  .chip { background:#1e1e28; color:#eee; border:1px solid #333; border-radius:999px; padding:5px 10px; font-size:12px; }
+  .chip.active { background:#2f2f40; border-color:#6c6cff; }
+  #controls { height: 36px; display: flex; align-items: center; gap: 6px; padding: 0 10px; background: #141419; border-bottom: 1px solid #26262e; }
+  #controls button { background:#1e1e28; color:#eee; border:1px solid #333; border-radius:8px; padding:5px 8px; font-size:11px; }
+  #controls button:hover { background:#2a2a36; }
+  #controls button.fade-on { border-color:#00e676; box-shadow: inset 0 0 0 1px #00e67655; }
+  #controls button.fade-off { border-color:#ff5252; box-shadow: inset 0 0 0 1px #ff525255; }
+  #zoom { width: 120px; }
+  #canvas-wrap { flex: 1 1 auto; min-height: 0; position: relative; }
+  #canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  #statusbar { flex: 0 0 auto; min-height: 28px; height: auto; display: flex; align-items: center; padding: 6px 10px; background: #141419; border-top: 1px solid #26262e; color: #aaa; font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #tooltip { position:absolute; display:none; background:rgba(20,20,28,.92); border:1px solid #333; border-radius:8px; padding:8px; pointer-events:none; }
+  #tooltip .name { font-size:12px; color:#fff; }
+  #tooltip .cat { font-size:11px; color:#aaa; margin-top:2px; }
+  #shortlist-panel { position:absolute; right:12px; top:62px; width:210px; max-height:calc(100% - 80px); background:rgba(20,20,24,.88); border:1px solid #333; border-radius:12px; padding:8px; display:none; flex-direction:column; gap:6px; overflow:auto; z-index:11; }
+  .panel-header { font-size:12px; color:#aaa; text-transform: uppercase; letter-spacing: 1px; }
+  #shortlist-item { display:flex; flex-direction:column; gap:4px; }
+  .shortlist-item { background:#1e1e28; border:1px solid #333; border-radius:8px; padding:8px; cursor:grab; font-size:12px; color:#eee; }
+  .shortlist-item .name { color:#fff; }
+  .shortlist-item .cat { color:#aaa; font-size:11px; }
+  #clear-shortlist { background:#3a1f1f; color:#ffab91; border:1px solid #5c2b2b; border-radius:8px; padding:5px; font-size:11px; }
+  #popover { position:absolute; display:none; background:#1a1a22; border:1px solid #333; border-radius:10px; padding:10px; gap:8px; flex-direction:column; min-width:180px; z-index:11; }
+  #popover.open { display:flex; }
+  #popover .popover-title { font-size:12px; color:#aaa; text-transform: uppercase; letter-spacing: 1px; }
+  #popover .popover-row { display:flex; gap:6px; align-items:center; }
+  #popover button { background:#1e1e28; color:#eee; border:1px solid #333; border-radius:8px; padding:6px 8px; font-size:12px; }
+  #popover label { color:#ccc; font-size:12px; gap:6px; display:flex; align-items:center; }
+  #ctx-menu { position:absolute; display:none; background:#1a1a22; border:1px solid #333; border-radius:10px; padding:6px; min-width:180px; }
+  #ctx-menu .item { padding:6px 8px; border-radius:6px; cursor:pointer; font-size:12px; color:#eee; }
+  #ctx-menu .item:hover { background:#2a2a36; }
+  #menu-lang { margin-left: auto; }
+</style>
+</head>
+<body>
+  <div id="app">
+    <div id="topbar">
+      <div id="filters">
+        <button class="chip active" data-cat="all" style="color:#6c6cff">All</button>
+        <button class="chip" data-cat="kick" style="color:#ff3d00;border-color:#ff3d00">Kick</button>
+        <button class="chip" data-cat="snare" style="color:#00e5ff;border-color:#00e5ff">Snare</button>
+        <button class="chip" data-cat="hat" style="color:#ffd600;border-color:#ffd600">Hat</button>
+        <button class="chip" data-cat="clap" style="color:#ff4081;border-color:#ff4081">Clap</button>
+        <button class="chip" data-cat="perc" style="color:#00e676;border-color:#00e676">Perc</button>
+        <button class="chip" data-cat="fx" style="color:#d500f9;border-color:#d500f9">FX</button>
+        <button class="chip" data-cat="vox" style="color:#18ffff;border-color:#18ffff">Vox</button>
+        <button class="chip" data-cat="bass" style="color:#ff9100;border-color:#ff9100">Bass</button>
+        <button class="chip" data-cat="other" style="color:#b0bec5;border-color:#b0bec5">Other</button>
+        <button class="chip" data-loop="loop" lang="ru">LOOP</button>
+        <button class="chip" data-loop="oneshot" lang="ru">ONE SHOT</button>
+      </div>
+      <div id="controls">
+        <button id="choose">Выбрать папку</button>
+        <button id="stop">Стоп</button>
+        <button id="noFade">Без затухания</button>
+        <input id="zoom" type="range" min="0.2" max="3" step="0.05" value="1" title="Zoom" />
+      </div>
+    </div>
+    <div id="canvas-wrap">
+      <canvas id="canvas"></canvas>
+    </div>
+    <div id="tooltip"><div class="name"></div><div class="cat"></div></div>
+    <div id="popover">
+      <div class="popover-title" data-i18n="repeat">Повтор</div>
+      <div class="popover-row">
+        <button data-value="1/4">1/4</button>
+        <button data-value="3/8">3/8</button>
+        <button data-value="1/8">1/8</button>
+        <button data-value="1/16">1/16</button>
+        <button data-value="1/2">1/2</button>
+        <button data-value="1">1</button>
+      </div>
+      <label class="popover-row">
+        <input type="checkbox" id="loop-quant" />
+        <span data-i18n="quantizeLoop">Квантовать цикл</span>
+      </label>
+    </div>
+    <aside id="shortlist-panel">
+      <div class="panel-header">ShortList</div>
+      <div id="shortlist-item"></div>
+      <button id="clear-shortlist">Clear</button>
+    </aside>
+    <div id="ctx-menu">
+      <div class="item" data-action="open">Открыть в проводнике</div>
+    </div>
+    <div id="statusbar">Нет папки</div>
+  </div>
+  <nav style="position:absolute;top:8px;right:10px;z-index:20;">
+    <select id="menu-lang">
+      <option value="ru">RU</option>
+      <option value="en">EN</option>
+    </select>
+  </nav>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="renderer.js"></script>
+</body>
+</html>
