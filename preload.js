@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('electron', {
   openItemInExplorer: (filePath) => ipcRenderer.invoke('open-in-explorer', filePath),
   openInBrowser: (filePath) => ipcRenderer.invoke('open-in-browser', filePath),
   openLastInAimp: (filePath) => ipcRenderer.invoke('open-last-in-aimp', filePath),
+  setInterfaceZoom: (level) => ipcRenderer.invoke('set-interface-zoom', level),
   onIndexProgress: (callback) => ipcRenderer.on('index-progress', (_event, data) => callback(data)),
   onIndexError: (callback) => ipcRenderer.on('index-error', (_event, data) => callback(data)),
   onZoomIn: (callback) => ipcRenderer.on('zoom-in', () => callback()),

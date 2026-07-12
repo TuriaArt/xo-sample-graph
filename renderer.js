@@ -50,7 +50,7 @@ function getSelectedNode() {
 let width, height;
 let currentAudio = null;
 let activeAudios = [];
-let fadeMode = true;
+let fadeMode = false;
 
 let audioCtx = null;
 let masterGain = null;
@@ -132,6 +132,15 @@ resize();
 
 document.getElementById('choose').addEventListener('click', chooseFolder);
 
+document.getElementById('zoom-ui-100').addEventListener('click', () => setInterfaceZoom(0));
+document.getElementById('zoom-ui-150').addEventListener('click', () => setInterfaceZoom(0.5));
+document.getElementById('zoom-ui-200').addEventListener('click', () => setInterfaceZoom(1));
+function setInterfaceZoom(level) {
+  try {
+    window.electron.setInterfaceZoom(level);
+  } catch {}
+}
+
 document.getElementById('stop').addEventListener('click', () => {
   stopCurrent(fadeMode);
 });
@@ -139,6 +148,7 @@ document.getElementById('noFade').addEventListener('click', () => {
   fadeMode = !fadeMode;
   updateFadeButton();
 });
+updateFadeButton();
 
 const zoomInput = document.getElementById('zoom');
 if (zoomInput) {
@@ -522,11 +532,21 @@ function draw() {
 
   const selectedNode = getSelectedNode();
   if (selectedNode) {
+    ctx.save();
     ctx.beginPath();
-    ctx.arc(selectedNode.x, selectedNode.y, selectedNode.r + 5, 0, Math.PI * 2);
-    ctx.strokeStyle = '#fff';
+    ctx.arc(selectedNode.x, selectedNode.y, selectedNode.r + 14, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
     ctx.lineWidth = 2;
+    ctx.setLineDash([4, 4]);
     ctx.stroke();
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(selectedNode.x, selectedNode.y, selectedNode.r + 6, 0, Math.PI * 2);
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2/devicePixelRatio;
+    ctx.stroke();
+    ctx.restore();
   }
 
   ctx.restore();

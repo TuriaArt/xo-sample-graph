@@ -1,6 +1,6 @@
 {
   "name": "xo-sample-graph",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "main": "main.js",
   "scripts": {

@@ -7,63 +7,6 @@ const { pathToFileURL } = require('url');
 
 let mainWindow;
 
-function buildMenu() {
-  const isMac = process.platform === 'darwin';
-  const fileSub = isMac ? [{ role: 'close' }] : [];
-  const template = [
-    ...(isMac ? [{ label: app.name, submenu: [{ role: 'quit' }] }] : []),
-    {
-      label: 'Файл',
-      submenu: [
-        { label: 'Выбрать папку...', accelerator: 'CmdOrCtrl+O', click: () => mainWindow.webContents.send('menu-choose-folder') },
-        { label: 'Переиндексировать', accelerator: 'CmdOrCtrl+R', click: () => mainWindow.webContents.send('menu-choose-folder') },
-        { type: 'separator' },
-        { label: 'Открыть в проводнике', accelerator: 'CmdOrCtrl+Shift+O', click: () => mainWindow.webContents.send('menu-open-last') },
-        { label: 'Открыть последний файл в AIMP', click: () => mainWindow.webContents.send('menu-open-last-in-aimp') },
-        ...fileSub,
-      ],
-    },
-    {
-      label: 'Правка',
-      submenu: [
-        { label: 'Копировать путь', accelerator: 'CmdOrCtrl+C', click: () => mainWindow.webContents.send('menu-copy-path') },
-      ],
-    },
-    {
-      label: 'Вид',
-      submenu: [
-        { label: 'Увеличить', accelerator: 'CmdOrCtrl+=', click: () => mainWindow.webContents.send('zoom-in') },
-        { label: 'Уменьшить', accelerator: 'CmdOrCtrl+-', click: () => mainWindow.webContents.send('zoom-out') },
-        { label: 'Сбросить зум', accelerator: 'CmdOrCtrl+0', click: () => mainWindow.webContents.send('zoom-reset') },
-        { type: 'separator' },
-        { label: 'Затухание ВКЛ', type: 'checkbox', click: () => mainWindow.webContents.send('toggle-fade') },
-        { label: 'Фильтр LOOP', type: 'checkbox', click: () => mainWindow.webContents.send('toggle-loop') },
-      ],
-    },
-    {
-      label: 'Окно',
-      submenu: [
-        { role: 'minimize' },
-        { role: 'zoom' },
-        ...(isMac ? [
-          { type: 'separator' },
-          { role: 'front' },
-        ] : [
-          { role: 'close' },
-        ]),
-      ],
-    },
-    {
-      label: 'Помощь',
-      submenu: [
-        { label: 'О программе', click: () => {} },
-      ],
-    },
-  ];
-  const menu = Menu.buildFromTemplate(template);
-  Menu.setApplicationMenu(menu);
-}
-
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -76,7 +19,7 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
-  buildMenu();
+  try { Menu.setApplicationMenu(null); } catch {}
 }
 
 app.whenReady().then(createWindow);
@@ -111,7 +54,7 @@ ipcMain.handle('index-folder', async (_event, folder) => {
       } else if (exts.includes(path.extname(entry.name).toLowerCase())) {
         const cat = guessCategory(full);
         categorySet.add(cat);
-        const isLoop = /loop|loops|loopable/.test(entry.name.toLowerCase());
+        const isLoop = /loop|loops|loopable/.test(entry.name.toLowerCase()) || /loop|loops|loopable/.test(path.basename(dir).toLowerCase());
         files.push({
           id: files.length,
           path: full,
@@ -186,11 +129,13 @@ ipcMain.handle('start-drag-file', async (_event, filePath) => {
 ipcMain.handle('open-in-explorer', async (_event, filePath) => {
   try {
     console.log('open-in-explorer:', filePath);
-    if (!filePath || !fs.existsSync(filePath)) return false;
-    await shell.showItemInFolder(filePath);
-    return true;
-  } catch (e) {
-    console.error('open-in-explorer error:', e);
+    if (!filePath || !filePath.trim()) return false;
+    try {
+      await shell.showItemInFolder(filePath);
+      return true;
+    } catch (e) {
+      console.error('open-in-explorer shell error:', e);
+    }
     try {
       const { execFile } = require('child_process');
       await new Promise((resolve, reject) => {
@@ -203,6 +148,9 @@ ipcMain.handle('open-in-explorer', async (_event, filePath) => {
       console.error('open-in-explorer fallback error:', e2);
       return false;
     }
+  } catch (e) {
+    console.error('open-in-explorer error:', e);
+    return false;
   }
 });
 
@@ -238,6 +186,17 @@ ipcMain.handle('open-last-in-aimp', async (_event, filePath) => {
     console.error('open-last-in-aimp error:', e);
     return false;
   }
+});
+
+ipcMain.handle('set-interface-zoom', (_event, level) => {
+  try {
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.setZoomLevel(level);
+    }
+  } catch (e) {
+    console.error('set-interface-zoom error:', e);
+  }
+  return true;
 });
 
 ipcMain.handle('copy-selected-path', async (_event, filePath) => {
