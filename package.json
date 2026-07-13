@@ -5,12 +5,37 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "index": "node indexer.js"
+    "index": "node indexer.js",
+    "build": "electron-builder --win",
+    "dist": "npm run build"
+  },
+  "build": {
+    "appId": "com.turiaart.xosamplegraph",
+    "productName": "XO Sample Graph",
+    "win": {
+      "target": "nsis",
+      "artifactName": "XO-Sample-Graph-Setup-${version}.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "XO Sample Graph"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "index.html",
+      "package.json"
+    ]
   },
   "dependencies": {
     "d3-force": "^3.0.0"
   },
   "devDependencies": {
-    "electron": "^34.0.0"
+    "electron": "^34.0.0",
+    "electron-builder": "^26.15.3"
   }
 }
