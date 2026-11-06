@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8" />
-  <title>XO Sample Graph v3.0.0</title>
+  <title>XO Sample Graph v3.1.0</title>
 <style>
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; height: 100%; background: #0f0f14; color: #eee; font-family: -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
@@ -41,6 +41,28 @@
   #ctx-menu .item { padding:6px 8px; border-radius:6px; cursor:pointer; font-size:12px; color:#eee; }
   #ctx-menu .item:hover { background:#2a2a36; }
   #menu-lang { margin-left: auto; }
+  #search-wrap { display:flex; align-items:center; gap:6px; padding:6px 10px; background:#141419; border-bottom:1px solid #26262e; }
+  #search { flex:1; max-width:340px; background:#1e1e28; color:#eee; border:1px solid #333; border-radius:8px; padding:6px 10px; font-size:12px; outline:none; }
+  #search:focus { border-color:#6c6cff; }
+  #search-count { color:#777; font-size:11px; white-space:nowrap; }
+  .chip.active-cat { box-shadow: inset 0 0 0 1px currentColor; }
+  #detail-panel { position:absolute; left:12px; bottom:12px; width:300px; max-height:50%; background:rgba(18,18,24,.94); border:1px solid #333; border-radius:12px; padding:10px; display:none; flex-direction:column; gap:8px; z-index:12; overflow:auto; }
+  #detail-panel.open { display:flex; }
+  #detail-head { display:flex; align-items:flex-start; gap:8px; }
+  #detail-title { flex:1; font-size:13px; color:#fff; word-break:break-all; }
+  #detail-close { background:none; border:none; color:#888; font-size:14px; cursor:pointer; padding:2px 6px; }
+  #detail-close:hover { color:#fff; }
+  #detail-meta { font-size:11px; color:#aaa; line-height:1.5; }
+  #detail-wave { width:100%; height:64px; background:#101016; border:1px solid #2a2a34; border-radius:8px; }
+  #detail-actions { display:flex; gap:6px; flex-wrap:wrap; }
+  #detail-actions button { background:#1e1e28; color:#eee; border:1px solid #333; border-radius:8px; padding:5px 8px; font-size:11px; cursor:pointer; }
+  #detail-actions button:hover { background:#2a2a36; }
+  #detail-sim { display:flex; flex-direction:column; gap:4px; }
+  .sim-item { background:#1e1e28; border:1px solid #333; border-radius:8px; padding:6px 8px; cursor:pointer; font-size:11px; display:flex; justify-content:space-between; gap:8px; }
+  .sim-item:hover { background:#2a2a36; }
+  .sim-item .nm { color:#eee; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sim-item .d { color:#777; flex-shrink:0; }
+  #export-btns { display:flex; gap:6px; }
 </style>
 </head>
 <body>
@@ -64,14 +86,34 @@
         <button id="choose">Выбрать папку</button>
         <button id="stop">Стоп</button>
         <button id="noFade">Без затухания</button>
+        <button id="links-toggle" data-i18n="links">Связи</button>
         <button id="zoom-ui-100">100%</button>
         <button id="zoom-ui-150">150%</button>
         <button id="zoom-ui-200">200%</button>
         <input id="zoom" type="range" min="0.2" max="3" step="0.05" value="1" title="Zoom" />
       </div>
+      <div id="search-wrap">
+        <input id="search" type="text" placeholder="Поиск по названию… (Ctrl+F)" />
+        <span id="search-count"></span>
+      </div>
     </div>
     <div id="canvas-wrap">
       <canvas id="canvas"></canvas>
+      <div id="detail-panel">
+        <div id="detail-head">
+          <div id="detail-title"></div>
+          <button id="detail-close" title="Esc">✕</button>
+        </div>
+        <canvas id="detail-wave"></canvas>
+        <div id="detail-meta"></div>
+        <div id="detail-actions">
+          <button id="detail-play" data-i18n="play">Играть</button>
+          <button id="detail-shortlist" data-i18n="addShortlist">В ShortList (S)</button>
+          <button id="detail-reveal" data-i18n="reveal">В папке</button>
+        </div>
+        <div class="panel-header" data-i18n="similar">Похожие</div>
+        <div id="detail-sim"></div>
+      </div>
     </div>
     <div id="tooltip"><div class="name"></div><div class="cat"></div></div>
     <div id="popover">
@@ -90,9 +132,14 @@
       </label>
     </div>
     <aside id="shortlist-panel">
-      <div class="panel-header">ShortList</div>
+      <div class="panel-header"><span data-i18n="shortlist">ShortList</span> <span id="shortlist-count"></span></div>
       <div id="shortlist-item"></div>
-      <button id="clear-shortlist">Clear</button>
+      <div id="export-btns">
+        <button id="export-txt" data-i18n="exportTxt">TXT</button>
+        <button id="export-csv" data-i18n="exportCsv">CSV</button>
+        <button id="export-json" data-i18n="exportJson">JSON</button>
+      </div>
+      <button id="clear-shortlist" data-i18n="clear">Clear</button>
     </aside>
     <div id="ctx-menu">
       <div class="item" data-action="open">Открыть в проводнике</div>

@@ -1,6 +1,6 @@
 {
   "name": "xo-sample-graph",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "private": true,
   "main": "main.js",
   "scripts": {
@@ -24,6 +24,7 @@
       "shortcutName": "XO Sample Graph"
     },
     "files": [
+      "audio-analyze.js",
       "main.js",
       "preload.js",
       "renderer.js",

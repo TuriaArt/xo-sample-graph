@@ -4,6 +4,30 @@ const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
+const { analyzeFile } = require('./audio-analyze');
+
+// simple on-disk cache for audio analysis (keyed by path|size|mtime)
+const CACHE_FILE = () => path.join(app.getPath('userData'), 'analysis-cache.json');
+let analysisCache = null;
+function loadCache() {
+  if (analysisCache) return analysisCache;
+  try { analysisCache = JSON.parse(fs.readFileSync(CACHE_FILE(), 'utf8')); }
+  catch { analysisCache = {}; }
+  return analysisCache;
+}
+function saveCache() {
+  try { fs.writeFileSync(CACHE_FILE(), JSON.stringify(analysisCache)); } catch {}
+}
+function cachedAnalyze(filePath) {
+  const cache = loadCache();
+  let stat;
+  try { stat = fs.statSync(filePath); } catch { return {}; }
+  const key = filePath + '|' + stat.size + '|' + Math.round(stat.mtimeMs);
+  if (cache[key]) return cache[key];
+  const info = analyzeFile(filePath) || {};
+  cache[key] = info;
+  return info;
+}
 
 let mainWindow;
 
@@ -55,6 +79,7 @@ ipcMain.handle('index-folder', async (_event, folder) => {
         const cat = guessCategory(full);
         categorySet.add(cat);
         const isLoop = /loop|loops|loopable/.test(entry.name.toLowerCase()) || /loop|loops|loopable/.test(path.basename(dir).toLowerCase());
+        const meta = cachedAnalyze(full);
         files.push({
           id: files.length,
           path: full,
@@ -62,6 +87,11 @@ ipcMain.handle('index-folder', async (_event, folder) => {
           folder: path.basename(dir),
           category: cat,
           loop: !!isLoop,
+          duration: typeof meta.duration === 'number' ? meta.duration : undefined,
+          size: meta.size,
+          sampleRate: meta.sampleRate,
+          channels: meta.channels,
+          bitsPerSample: meta.bitsPerSample,
         });
         scanned++;
         last = entry.name;
@@ -78,8 +108,17 @@ ipcMain.handle('index-folder', async (_event, folder) => {
     mainWindow.webContents.send('index-error', { folder, error: String(e) });
   }
 
+  saveCache();
   mainWindow.webContents.send('index-progress', { folder, scanned, last: 'DONE' });
   return { files, categories: Array.from(categorySet).sort() };
+});
+
+ipcMain.handle('analyze-file', async (_event, filePath) => {
+  try {
+    return cachedAnalyze(filePath);
+  } catch {
+    return {};
+  }
 });
 
 function guessCategory(full) {
@@ -204,6 +243,24 @@ ipcMain.handle('copy-selected-path', async (_event, filePath) => {
     if (!filePath) return false;
     clipboard.writeText(filePath);
     return true;
+  } catch {
+    return false;
+  }
+});
+
+ipcMain.handle('save-file', async (_event, defaultName, content) => {
+  try {
+    const result = await dialog.showSaveDialog(mainWindow, {
+      defaultPath: defaultName,
+      filters: [
+        { name: 'Text', extensions: ['txt'] },
+        { name: 'CSV', extensions: ['csv'] },
+        { name: 'JSON', extensions: ['json'] },
+      ],
+    });
+    if (result.canceled || !result.filePath) return false;
+    fs.writeFileSync(result.filePath, String(content), 'utf8');
+    return result.filePath;
   } catch {
     return false;
   }
