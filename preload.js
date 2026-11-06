@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('electron', {
   removeTmpFile: (url) => ipcRenderer.invoke('remove-tmp-file', url),
   startDragFile: (filePath) => ipcRenderer.invoke('start-drag-file', filePath),
   openItemInExplorer: (filePath) => ipcRenderer.invoke('open-in-explorer', filePath),
+  analyzeFile: (filePath) => ipcRenderer.invoke('analyze-file', filePath),
+  saveFile: (defaultName, content) => ipcRenderer.invoke('save-file', defaultName, content),
   openInBrowser: (filePath) => ipcRenderer.invoke('open-in-browser', filePath),
   openLastInAimp: (filePath) => ipcRenderer.invoke('open-last-in-aimp', filePath),
   setInterfaceZoom: (level) => ipcRenderer.invoke('set-interface-zoom', level),

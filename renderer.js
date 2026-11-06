@@ -72,6 +72,207 @@ function ensureAudioContext() {
   } catch {}
 }
 
+// ---- audio fingerprint-ish descriptors (computed lazily via WebAudio decode) ----
+const descriptorCache = new Map(); // sample path -> descriptor
+let computingSet = new Set();      // paths currently being computed
+
+async function ensureDescriptor(sample) {
+  if (!sample) return null;
+  const cached = descriptorCache.get(sample.path);
+  if (cached) return cached;
+  if (computingSet.has(sample.path)) return null;
+  computingSet.add(sample.path);
+  try {
+    ensureAudioContext();
+    if (!audioCtx) return null;
+    const preview = await window.electron.previewSampleUrl(sample.path);
+    if (!preview || !preview.url) return null;
+    const res = await fetch(preview.url);
+    const buf = await res.arrayBuffer();
+    let audio;
+    try {
+      audio = await audioCtx.decodeAudioData(buf);
+    } catch {
+      cleanupPreview(preview.url);
+      return null;
+    }
+    cleanupPreview(preview.url);
+    const desc = computeDescriptor(audio);
+    descriptorCache.set(sample.path, desc);
+    sample.duration = desc.duration;
+    return desc;
+  } catch {
+    return null;
+  } finally {
+    computingSet.delete(sample.path);
+  }
+}
+
+function computeDescriptor(audioBuffer) {
+  const ch = audioBuffer.getChannelData(0);
+  const sr = audioBuffer.sampleRate;
+  const n = ch.length;
+  if (!n) return null;
+  // RMS energy
+  let sum2 = 0;
+  for (let i = 0; i < n; i++) sum2 += ch[i] * ch[i];
+  const rms = Math.sqrt(sum2 / n);
+  // zero crossing rate
+  let zc = 0;
+  for (let i = 1; i < n; i++) if ((ch[i - 1] < 0) !== (ch[i] < 0)) zc++;
+  const zcr = zc / n;
+  // spectral centroid via FFT of a windowed slice (up to ~4s at 22kHz)
+  const sliceRate = Math.min(sr, 22050);
+  const step = Math.max(1, Math.round(sr / sliceRate));
+  const maxLen = Math.min(n, Math.floor(sliceRate * 4));
+  const win = [];
+  for (let i = 0; i < maxLen; i += step) win.push(ch[i]);
+  const spec = spectrumStats(win, sliceRate);
+  // attack time: first index where running peak > 60% of overall peak
+  let peak = 0;
+  for (let i = 0; i < n; i += 64) { const a = Math.abs(ch[i]); if (a > peak) peak = a; }
+  let attackSec = 0;
+  const thresh = peak * 0.6;
+  for (let i = 0; i < n; i += 32) { if (Math.abs(ch[i]) >= thresh) { attackSec = i / sr; break; } }
+  return {
+    duration: audioBuffer.duration,
+    rms,
+    zcr,
+    centroid: spec.centroid,
+    bassFrac: spec.bassFrac,     // energy below 250 Hz
+    midFrac: spec.midFrac,       // 250-2000 Hz
+    highFrac: spec.highFrac,     // above 2 kHz
+    attackSec,
+    logDur: Math.log2(Math.max(0.01, audioBuffer.duration)),
+  };
+}
+
+function spectrumStats(samples, sr) {
+  // simple real DFT on downsampled signal, limited bins
+  const N = 1 << 13; // 8192 — always a power of two for the radix-2 FFT
+  const len = N;
+  const re = new Float64Array(len);
+  const im = new Float64Array(len);
+  const slen = Math.min(samples.length, N);
+  for (let i = 0; i < slen; i++) {
+    const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (slen - 1 || 1));
+    re[i] = samples[i] * w;
+  }
+  fftInPlace(re, im);
+  const half = len >> 1;
+  const binHz = sr / len;
+  let totalE = 0, weightedE = 0, bass = 0, mid = 0, high = 0;
+  for (let k = 1; k < half; k++) {
+    const e = re[k] * re[k] + im[k] * im[k];
+    const f = k * binHz;
+    totalE += e;
+    weightedE += e * f;
+    if (f < 250) bass += e;
+    else if (f < 2000) mid += e;
+    else high += e;
+  }
+  if (!totalE) return { centroid: 0, bassFrac: 0, midFrac: 0, highFrac: 0 };
+  return {
+    centroid: weightedE / totalE,
+    bassFrac: bass / totalE,
+    midFrac: mid / totalE,
+    highFrac: high / totalE,
+  };
+}
+
+// iterative radix-2 FFT (in place), length must be power of two
+function fftInPlace(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const ur = re[i + k], ui = im[i + k];
+        const vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci;
+        const vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+        re[i + k] = ur + vr; im[i + k] = ui + vi;
+        re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+        const ncr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+}
+
+function descriptorDistance(a, b) {
+  if (!a || !b) return Infinity;
+  const normCentroid = (d) => Math.log2(Math.max(30, d.centroid));
+  const scale = (v, lo, hi) => (v - lo) / (hi - lo || 1);
+  const parts = [
+    (a.logDur - b.logDur) * 1.2,
+    (scale(a.rms, 0, 0.5) - scale(b.rms, 0, 0.5)) * 1.0,
+    (a.zcr - b.zcr) * 8,
+    (normCentroid(a) - normCentroid(b)) * 1.0,
+    (a.bassFrac - b.bassFrac) * 2.5,
+    (a.midFrac - b.midFrac) * 1.5,
+    (a.highFrac - b.highFrac) * 1.5,
+    (Math.log2(Math.max(0.001, a.attackSec)) - Math.log2(Math.max(0.001, b.attackSec))) * 0.6,
+  ];
+  let s = 0;
+  for (const p of parts) s += p * p;
+  return Math.sqrt(s);
+}
+
+async function findSimilar(node, limit = 6) {
+  const self = node.sample;
+  const myDesc = await ensureDescriptor(self);
+  if (!myDesc) return [];
+  const candidates = nodes.filter((n) => n.id !== node.id && n.group === node.group);
+  const scored = [];
+  for (const cand of candidates) {
+    const d = descriptorCache.get(cand.sample.path);
+    if (d) scored.push({ node: cand, dist: descriptorDistance(myDesc, d) });
+  }
+  // background-compute the rest without blocking the UI
+  (async () => {
+    let budget = 12; // per selection, keep CPU bounded
+    for (const cand of candidates) {
+      if (budget <= 0) break;
+      if (descriptorCache.has(cand.sample.path)) continue;
+      await ensureDescriptor(cand.sample.path);
+      budget--;
+    }
+    // refresh panel if still showing same node
+    if (detailNodeId === node.id) renderDetailPanel(node);
+ })();
+  scored.sort((x, y) => x.dist - y.dist);
+  return scored.slice(0, limit);
+}
+
+function buildLinks() {
+  links = [];
+  if (!showLinks) return;
+  const byGroup = {};
+  for (const n of nodes) {
+    if (!descriptorCache.has(n.sample.path)) continue;
+    (byGroup[n.group] = byGroup[n.group] || []).push(n);
+  }
+  for (const groupNodes of Object.values(byGroup)) {
+    const arr = groupNodes.map((n) => ({ n, d: descriptorCache.get(n.sample.path) }));
+    for (let i = 0; i < arr.length; i++) {
+      for (let j = i + 1; j < arr.length; j++) {
+        const dist = descriptorDistance(arr[i].d, arr[j].d);
+        if (dist < 0.85) {
+          links.push({ source: arr[i].n, target: arr[j].n, dist });
+        }
+      }
+    }
+  }
+}
+
 let cam = { x: 0, y: 0, zoom: 1 };
 let isPanning = false;
 let panStart = { x: 0, y: 0 };
@@ -92,6 +293,23 @@ const i18n = {
     noFolder: 'Нет папки',
     indexing: (folder) => `Индексация: ${folder}`,
     loaded: (n) => `Загружено: ${n} сэмплов`,
+    links: 'Связи',
+    linksOn: 'Связи: вкл',
+    play: 'Играть',
+    addShortlist: 'В ShortList (S)',
+    removeShortlist: 'Убрать (S)',
+    reveal: 'В папке',
+    similar: 'Похожие',
+    shortlist: 'ShortList',
+    clear: 'Очистить',
+    searchPlaceholder: 'Поиск по названию… (/)',
+    noSimilar: 'Нет похожих',
+    exported: (n) => `Экспортировано: ${n}`,
+    matchCount: (n) => `${n} совпадений`,
+    analyzing: 'Анализ…',
+    duration: 'Длительность',
+    size: 'Размер',
+    folderLabel: 'Папка',
   },
   en: {
     empty: 'Click “Choose folder” and select a samples folder',
@@ -102,6 +320,23 @@ const i18n = {
     noFolder: 'No folder',
     indexing: (folder) => `Indexing: ${folder}`,
     loaded: (n) => `Loaded ${n} samples`,
+    links: 'Links',
+    linksOn: 'Links: on',
+    play: 'Play',
+    addShortlist: 'Add to ShortList (S)',
+    removeShortlist: 'Remove (S)',
+    reveal: 'Reveal',
+    similar: 'Similar',
+    shortlist: 'ShortList',
+    clear: 'Clear',
+    searchPlaceholder: 'Search by name… (/)',
+    noSimilar: 'No similar found',
+    exported: (n) => `Exported: ${n}`,
+    matchCount: (n) => `${n} matches`,
+    analyzing: 'Analyzing…',
+    duration: 'Duration',
+    size: 'Size',
+    folderLabel: 'Folder',
   },
 };
 function t(key, ...args) {
@@ -144,6 +379,56 @@ function setInterfaceZoom(level) {
 document.getElementById('stop').addEventListener('click', () => {
   stopCurrent(fadeMode);
 });
+
+const searchInput = document.getElementById('search');
+const searchCount = document.getElementById('search-count');
+if (searchInput) {
+  searchInput.placeholder = t('searchPlaceholder');
+  let searchTimer = null;
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      searchTerm = searchInput.value.trim().toLowerCase();
+      updateSearchCount();
+      draw();
+    }, 120);
+  });
+}
+function nodeVisible(n) {
+  if (activeFilter !== 'all' && n.group !== activeFilter) return false;
+  if (loopFilter === 'loop' && !n.sample.loop) return false;
+  if (loopFilter === 'oneshot' && n.sample.loop) return false;
+  if (searchTerm && !(n.sample.name.toLowerCase().includes(searchTerm) || (n.sample.folder || '').toLowerCase().includes(searchTerm))) return false;
+  return true;
+}
+function updateSearchCount() {
+  if (!searchCount) return;
+  if (!searchTerm) { searchCount.textContent = ''; return; }
+  const c = nodes.filter(nodeVisible).length;
+  searchCount.textContent = t('matchCount', c);
+}
+
+const linksBtn = document.getElementById('links-toggle');
+if (linksBtn) {
+  linksBtn.addEventListener('click', async () => {
+    showLinks = !showLinks;
+    linksBtn.classList.toggle('fade-on', showLinks);
+    linksBtn.textContent = showLinks ? t('linksOn') : t('links');
+    if (showLinks) await computeDescriptorsForVisible(60);
+    buildLinks();
+    draw();
+  });
+}
+
+async function computeDescriptorsForVisible(limit) {
+  // compute descriptors for visible nodes not yet analyzed, bounded by limit
+  const todo = nodes.filter((n) => nodeVisible(n) && !descriptorCache.has(n.sample.path));
+  let budget = Math.min(limit, todo.length);
+  for (let i = 0; i < budget; i++) {
+    await ensureDescriptor(todo[i].sample);
+    if (i % 10 === 9) await new Promise((r) => setTimeout(r, 0)); // yield to UI
+  }
+}
 document.getElementById('noFade').addEventListener('click', () => {
   fadeMode = !fadeMode;
   updateFadeButton();
@@ -172,7 +457,26 @@ if (zoomInput) {
 }
 
 window.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') {
+    if (e.key === 'Escape') { e.target.blur(); }
+    return;
+  }
+  if (e.key === '/') {
+    e.preventDefault();
+    const si = document.getElementById('search');
+    if (si) si.focus();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && e.code === 'KeyF') {
+    e.preventDefault();
+    const si = document.getElementById('search');
+    if (si) si.focus();
+    return;
+  }
+  if (e.key === 'Escape') {
+    closeDetailPanel();
+    return;
+  }
   if (e.code === 'Space') {
     e.preventDefault();
     stopCurrent(fadeMode);
@@ -196,7 +500,8 @@ window.addEventListener('keydown', (e) => {
     status.textContent = `${selected.sample.name} | ${selected.sample.category} | ${selected.sample.path}`;
     (async () => {
       const preview = await window.electron.previewSampleUrl(selected.sample.path);
-      if (preview?.url) playPreview(preview, selected.sample.name);
+      if (preview?.url) playPreview(preview, selected.sample.name, selected.sample.path);
+      openDetailPanel(selected);
     })();
   }
 });
@@ -450,7 +755,7 @@ function buildGraph() {
         vx: 0,
         vy: 0,
         color: categoryColor(cat),
-        r: 2 + Math.random() * 1.5,
+        r: s.duration ? 2.5 + Math.min(6, Math.sqrt(s.duration) * 2) : 2 + Math.random() * 1.5,
         group: cat,
       };
       nodes.push(node);
@@ -520,14 +825,38 @@ function draw() {
   ctx.translate(cam.x, cam.y);
   ctx.scale(cam.zoom, cam.zoom);
 
+  if (showLinks && links.length) {
+    ctx.strokeStyle = 'rgba(140,140,255,0.18)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const l of links) {
+      if (!nodeVisible(l.source) || !nodeVisible(l.target)) continue;
+      ctx.moveTo(l.source.x, l.source.y);
+      ctx.lineTo(l.target.x, l.target.y);
+    }
+    ctx.stroke();
+  }
+
+  const playingPaths = new Set(activeAudios.map((a) => a.path).filter(Boolean));
   for (const n of nodes) {
     if (activeFilter !== 'all' && n.group !== activeFilter) continue;
     if (loopFilter === 'loop' && !n.sample.loop) continue;
     if (loopFilter === 'oneshot' && n.sample.loop) continue;
+    const matchesSearch = !searchTerm || n.sample.name.toLowerCase().includes(searchTerm) || (n.sample.folder || '').toLowerCase().includes(searchTerm);
+    ctx.globalAlpha = matchesSearch ? 1 : 0.12;
     ctx.beginPath();
-    ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+    let r = n.r;
+    if (playingPaths.has(n.sample.path)) r *= 1.8;
+    else if (shortlist.has(n.id)) r *= 1.4;
+    ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
     ctx.fillStyle = n.color;
     ctx.fill();
+    if (shortlist.has(n.id)) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
   }
 
   const selectedNode = getSelectedNode();
@@ -557,10 +886,7 @@ async function hitTest(sx, sy) {
   let best = null;
   let bestD = Infinity;
   for (const n of nodes) {
-    if (activeFilter !== 'all' && n.group !== activeFilter) continue;
-    if (loopFilter === 'loop' && !n.sample.loop) continue;
-    if (loopFilter === 'oneshot' && n.sample.loop) continue;
-    if (searchTerm && !n.sample.name.toLowerCase().includes(searchTerm)) continue;
+    if (!nodeVisible(n)) continue;
     const dx = n.x - p.x, dy = n.y - p.y;
     const d = dx*dx + dy*dy;
     if (d < bestD) { bestD = d; best = n; }
@@ -581,13 +907,13 @@ function stopCurrent(fade) {
   currentAudio = null;
 }
 
-function playPreview(preview, name) {
+function playPreview(preview, name, path) {
   try {
     ensureAudioContext();
     if (!fadeMode) stopCurrent(fadeMode);
     const audio = new Audio(preview.url);
     audio.play().catch((e) => console.error('play() rejected', e));
-    const item = { source: audio, gain: null, context: null, url: preview.url, name };
+    const item = { source: audio, gain: null, context: null, url: preview.url, name, path };
     try {
       if (audioCtx) {
         const node = audioCtx.createMediaElementSource(audio);
@@ -597,11 +923,14 @@ function playPreview(preview, name) {
     activeAudios.push(item);
     currentAudio = item;
     status.textContent = t('playing', name);
+    draw();
+    updatePlayButton();
     audio.onended = () => {
       activeAudios = activeAudios.filter((a) => a !== item);
       cleanupPreview(preview.url);
       if (currentAudio === item) currentAudio = null;
       draw();
+      updatePlayButton();
     };
   } catch (e) {
     console.error('Preview error', e);
@@ -624,9 +953,10 @@ canvas.addEventListener('click', async (e) => {
   lastSample = hit.sample;
   draw();
   status.textContent = `${hit.sample.name} | ${hit.sample.category} | ${hit.sample.path}`;
+  openDetailPanel(hit);
   const preview = await window.electron.previewSampleUrl(hit.sample.path);
   if (!preview || !preview.url) { status.textContent = t('previewFailed'); return; }
-  playPreview(preview, hit.sample.name);
+  playPreview(preview, hit.sample.name, hit.sample.path);
 });
 
 canvas.addEventListener('dblclick', async (e) => {
@@ -683,6 +1013,181 @@ canvas.addEventListener('mousemove', async (e) => {
   }
 });
 
+// ---- Detail panel: waveform, metadata, similar samples ----
+let detailNodeId = null;
+let waveCache = new Map(); // path -> peaks Float32Array (min/max pairs)
+
+function closeDetailPanel() {
+  detailNodeId = null;
+  const panel = document.getElementById('detail-panel');
+  if (panel) panel.classList.remove('open');
+}
+
+async function openDetailPanel(node) {
+  detailNodeId = node.id;
+  const panel = document.getElementById('detail-panel');
+  panel.classList.add('open');
+  await renderDetailPanel(node);
+}
+
+async function renderDetailPanel(node) {
+  const s = node.sample;
+  document.getElementById('detail-title').textContent = s.name;
+  const meta = [];
+  meta.push(`${t('folderLabel')}: ${s.folder || '—'}`);
+  const dur = s.duration != null ? s.duration : (descriptorCache.get(s.path) || {}).duration;
+  if (dur != null) meta.push(`${t('duration')}: ${dur.toFixed(2)} s`);
+  if (s.size != null) meta.push(`${t('size')}: ${(s.size / 1024).toFixed(0)} KB`);
+  if (s.sampleRate) meta.push(`SR: ${s.sampleRate} Hz`);
+  if (s.channels) meta.push(`CH: ${s.channels}`);
+  if (s.bitsPerSample) meta.push(`${s.bitsPerSample}-bit`);
+  if (s.loop) meta.push('LOOP');
+  meta.push(s.path);
+  document.getElementById('detail-meta').textContent = meta.join('\n');
+  updateShortlistButton();
+  updatePlayButton();
+  drawWaveform(node);
+  const simBox = document.getElementById('detail-sim');
+  simBox.innerHTML = `<div style="color:#777;font-size:11px">${t('analyzing')}</div>`;
+  const sim = await findSimilar(node, 6);
+  if (detailNodeId !== node.id) return;
+  simBox.innerHTML = '';
+  if (!sim.length) {
+    simBox.innerHTML = `<div style="color:#777;font-size:11px">${t('noSimilar')}</div>`;
+    return;
+  }
+  for (const { node: cand, dist } of sim) {
+    const row = document.createElement('div');
+    row.className = 'sim-item';
+    row.innerHTML = `<span class="nm" style="color:${cand.color}">${cand.sample.name}</span><span class="d">~${dist.toFixed(2)}</span>`;
+    row.addEventListener('click', async () => {
+      selectedId = cand.id;
+      lastSample = cand.sample;
+      draw();
+      await openDetailPanel(cand);
+      const preview = await window.electron.previewSampleUrl(cand.sample.path);
+      if (preview?.url) playPreview(preview, cand.sample.name, cand.sample.path);
+    });
+    simBox.appendChild(row);
+  }
+}
+
+function updateShortlistButton() {
+  const btn = document.getElementById('detail-shortlist');
+  if (!btn) return;
+  const on = shortlist.has(detailNodeId);
+  btn.textContent = on ? t('removeShortlist') : t('addShortlist');
+}
+function updatePlayButton() {
+  const btn = document.getElementById('detail-play');
+  if (!btn) return;
+  const node = nodes.find((n) => n.id === detailNodeId);
+  const playing = node && activeAudios.some((a) => a.path === node.sample.path);
+  btn.textContent = playing ? '⏸ ' + (lang === 'ru' ? 'Пауза' : 'Pause') : '▶ ' + t('play');
+}
+
+async function drawWaveform(node) {
+  const cv = document.getElementById('detail-wave');
+  const wctx = cv.getContext('2d');
+  const dpr = devicePixelRatio || 1;
+  const W = cv.clientWidth || 280;
+  const H = cv.clientHeight || 64;
+  cv.width = W * dpr; cv.height = H * dpr;
+  wctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  wctx.clearRect(0, 0, W, H);
+  const path = node.sample.path;
+  let peaks = waveCache.get(path);
+  if (!peaks) {
+    wctx.fillStyle = '#555';
+    wctx.font = '11px sans-serif';
+    wctx.fillText(t('analyzing'), 8, H / 2 + 4);
+    peaks = await computePeaks(path);
+    if (peaks) waveCache.set(path, peaks);
+  }
+  if (detailNodeId !== node.id) return;
+  wctx.clearRect(0, 0, W, H);
+  if (!peaks || !peaks.length) {
+    wctx.fillStyle = '#555';
+    wctx.font = '11px sans-serif';
+    wctx.fillText('waveform n/a', 8, H / 2 + 4);
+    return;
+  }
+  wctx.strokeStyle = node.color;
+  wctx.lineWidth = 1;
+  wctx.beginPath();
+  const cols = peaks.length / 2;
+  for (let i = 0; i < cols; i++) {
+    const x = (i / (cols - 1 || 1)) * W;
+    const mn = peaks[i * 2], mx = peaks[i * 2 + 1];
+    const y1 = H / 2 - mx * (H / 2 - 2);
+    const y2 = H / 2 - mn * (H / 2 - 2);
+    wctx.moveTo(x, y1);
+    wctx.lineTo(x, y2);
+  }
+  wctx.stroke();
+}
+
+async function computePeaks(filePath, cols = 120) {
+  try {
+    ensureAudioContext();
+    if (!audioCtx) return null;
+    const preview = await window.electron.previewSampleUrl(filePath);
+    if (!preview || !preview.url) return null;
+    const res = await fetch(preview.url);
+    const buf = await res.arrayBuffer();
+    let audio;
+    try { audio = await audioCtx.decodeAudioData(buf); }
+    catch { cleanupPreview(preview.url); return null; }
+    cleanupPreview(preview.url);
+    const ch = audio.getChannelData(0);
+    const per = Math.max(1, Math.floor(ch.length / cols));
+    const peaks = new Float32Array(cols * 2);
+    for (let c = 0; c < cols; c++) {
+      let mn = 0, mx = 0;
+      const start = c * per, end = Math.min(ch.length, start + per);
+      for (let i = start; i < end; i++) {
+        const v = ch[i];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+      }
+      peaks[c * 2] = mn;
+      peaks[c * 2 + 1] = mx;
+    }
+    return peaks;
+  } catch {
+    return null;
+  }
+}
+
+document.getElementById('detail-close').addEventListener('click', closeDetailPanel);
+document.getElementById('detail-play').addEventListener('click', async () => {
+  const node = nodes.find((n) => n.id === detailNodeId);
+  if (!node) return;
+  const playing = activeAudios.find((a) => a.path === node.sample.path);
+  if (playing) {
+    try { playing.source.pause(); } catch {}
+    activeAudios = activeAudios.filter((a) => a !== playing);
+    cleanupPreview(playing.url);
+    updatePlayButton();
+    draw();
+    return;
+  }
+  const preview = await window.electron.previewSampleUrl(node.sample.path);
+  if (preview?.url) { playPreview(preview, node.sample.name, node.sample.path); updatePlayButton(); }
+});
+document.getElementById('detail-shortlist').addEventListener('click', () => {
+  if (detailNodeId == null) return;
+  if (shortlist.has(detailNodeId)) shortlist.delete(detailNodeId);
+  else shortlist.add(detailNodeId);
+  updateShortlistState();
+  updateShortlistButton();
+  draw();
+});
+document.getElementById('detail-reveal').addEventListener('click', () => {
+  const node = nodes.find((n) => n.id === detailNodeId);
+  if (node) window.electron.openItemInExplorer(node.sample.path).catch(() => {});
+});
+
 function renderShortlistPanel() {
   const panel = document.getElementById('shortlist-panel');
   const list = document.getElementById('shortlist-item');
@@ -693,10 +1198,12 @@ function renderShortlistPanel() {
     row.innerHTML = `<div class="name">${n.sample.name}</div><div class="cat">${n.sample.category}</div>`;
     row.addEventListener('click', async () => {
       selectedId = n.id;
+      lastSample = n.sample;
       draw();
+      await openDetailPanel(n);
       status.textContent = `${n.sample.name} | ${n.sample.category} | ${n.sample.path}`;
       const preview = await window.electron.previewSampleUrl(n.sample.path);
-      if (preview?.url) playPreview(preview, n.sample.name);
+      if (preview?.url) playPreview(preview, n.sample.name, n.sample.path);
     });
     list.appendChild(row);
   });
@@ -723,11 +1230,15 @@ function updateShortlistState() {
 function restoreShortlist() {
   try {
     const raw = localStorage.getItem('shortlist');
-    if (!raw) return;
-    const ids = JSON.parse(raw);
-    const valid = new Set(ids.filter((id) => nodes.some((n) => n.id === id)));
-    shortlist = valid;
+    if (raw) {
+      const ids = JSON.parse(raw);
+      // node ids are rebuilt on each index; map old ids via saved paths if possible
+      const byPath = new Map(samples.map((s) => [s.path, s]));
+      shortlist = new Set(nodes.filter((n) => ids.includes(n.id)).map((n) => n.id));
+    }
+    closeDetailPanel();
     updateShortlistState();
+    draw();
   } catch {}
 }
 
@@ -745,10 +1256,64 @@ function showToast(msg) {
   t._timer = setTimeout(() => { t.style.display = 'none'; }, 1800);
 }
 
+// ---- ShortList export: TXT / CSV / JSON ----
+function shortlistSamples() {
+  return [...shortlist].map((id) => nodes.find((n) => n.id === id)).filter(Boolean).map((n) => n.sample);
+}
+function exportShortlist(format) {
+  const items = shortlistSamples();
+  if (!items.length) return;
+  let content = '', filename = 'xo-shortlist';
+  if (format === 'txt') {
+    content = items.map((s) => s.path).join('\r\n');
+    filename += '.txt';
+  } else if (format === 'csv') {
+    const esc = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+    const rows = [['name', 'category', 'duration', 'loop', 'path'].join(',')];
+    for (const s of items) {
+      rows.push([esc(s.name), esc(s.category), s.duration != null ? s.duration.toFixed(3) : '', s.loop ? 1 : 0, esc(s.path)].join(','));
+    }
+    content = rows.join('\r\n');
+    filename += '.csv';
+  } else {
+    content = JSON.stringify(items.map((s) => ({
+      name: s.name, category: s.category, loop: !!s.loop,
+      duration: s.duration ?? null, size: s.size ?? null,
+      sampleRate: s.sampleRate ?? null, channels: s.channels ?? null, path: s.path,
+    })), null, 2);
+    filename += '.json';
+  }
+  window.electron.saveFile(filename, content).then((saved) => {
+    if (saved) showToast(t('exported', items.length));
+  });
+}
+document.getElementById('export-txt').addEventListener('click', () => exportShortlist('txt'));
+document.getElementById('export-csv').addEventListener('click', () => exportShortlist('csv'));
+document.getElementById('export-json').addEventListener('click', () => exportShortlist('json'));
+document.getElementById('clear-shortlist').addEventListener('click', () => {
+  shortlist.clear();
+  updateShortlistState();
+  draw();
+});
+
 document.getElementById('menu-lang').addEventListener('change', (e) => {
   lang = e.target.value;
   localStorage.setItem('lang', lang);
   updateFadeButton();
   renderCategoryChips([...new Set(samples.map((s) => s.category).filter(Boolean))].sort() || ['other']);
+  applyStaticI18n();
 });
+
+function applyStaticI18n() {
+  const si = document.getElementById('search');
+  if (si) si.placeholder = t('searchPlaceholder');
+  const lb = document.getElementById('links-toggle');
+  if (lb) lb.textContent = showLinks ? t('linksOn') : t('links');
+  document.querySelectorAll('[data-i18n]').forEach((el) => {
+    const key = el.getAttribute('data-i18n');
+    if (i18n[lang] && typeof i18n[lang][key] === 'string') el.textContent = i18n[lang][key];
+  });
+  updateShortlistButton();
+  updatePlayButton();
+}
 updateFadeButton();
